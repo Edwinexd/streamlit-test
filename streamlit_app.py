@@ -1,56 +1,101 @@
 import streamlit as st
-from openai import OpenAI
+from llama_cpp import Llama
 
 # Show title and description.
 st.title("💬 Chatbot")
 st.write(
-    "This is a simple chatbot that uses OpenAI's GPT-3.5 model to generate responses. "
-    "To use this app, you need to provide an OpenAI API key, which you can get [here](https://platform.openai.com/account/api-keys). "
-    "You can also learn how to build this app step by step by [following our tutorial](https://docs.streamlit.io/develop/tutorials/llms/build-conversational-apps)."
+    "This is a simple chatbot that uses a local Llama model to generate responses. "
 )
 
-# Ask user for their OpenAI API key via `st.text_input`.
-# Alternatively, you can store the API key in `./.streamlit/secrets.toml` and access it
-# via `st.secrets`, see https://docs.streamlit.io/develop/concepts/connections/secrets-management
-openai_api_key = st.text_input("OpenAI API Key", type="password")
-if not openai_api_key:
-    st.info("Please add your OpenAI API key to continue.", icon="🗝️")
-else:
+# Load the model using from_pretrained (cached in session state to avoid reloading)
+@st.cache_resource
+def load_model():
+    """Load the Llama model from Hugging Face Hub."""
+    print("Loading model from Hugging Face Hub...")
+    llm = Llama.from_pretrained(
+        repo_id="kinga-anna/lora_model_merged-Q4_K_M-GGUF",
+        filename="lora_model_merged-q4_k_m.gguf",
+        n_ctx=2048,  # Context window
+        n_threads=4,  # Adjust based on your CPU
+        n_gpu_layers=0,  # Set to higher value if you have GPU support
+        verbose=False,
+    )
+    return llm
 
-    # Create an OpenAI client.
-    client = OpenAI(api_key=openai_api_key)
 
-    # Create a session state variable to store the chat messages. This ensures that the
-    # messages persist across reruns.
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
+def format_prompt(message: str, history: list) -> str:
+    """Format the conversation using Llama 3.1 chat template."""
+    system_prompt = "Cutting Knowledge Date: December 2023\nToday Date: 26 July 2024\n\n"
 
-    # Display the existing chat messages via `st.chat_message`.
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+    prompt = "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n"
+    prompt += system_prompt
+    prompt += "<|eot_id|>"
 
-    # Create a chat input field to allow the user to enter a message. This will display
-    # automatically at the bottom of the page.
-    if prompt := st.chat_input("What is up?"):
+    # Add conversation history
+    for user_msg, assistant_msg in history:
+        prompt += f"<|start_header_id|>user<|end_header_id|>\n\n{user_msg}<|eot_id|>"
+        prompt += f"<|start_header_id|>assistant<|end_header_id|>\n\n{assistant_msg}<|eot_id|>"
 
-        # Store and display the current prompt.
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+    # Add current message
+    prompt += f"<|start_header_id|>user<|end_header_id|>\n\n{message}<|eot_id|>"
+    prompt += "<|start_header_id|>assistant<|end_header_id|>\n\n"
 
-        # Generate a response using the OpenAI API.
-        stream = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": m["role"], "content": m["content"]}
-                for m in st.session_state.messages
-            ],
-            stream=True,
-        )
+    return prompt
 
-        # Stream the response to the chat using `st.write_stream`, then store it in 
-        # session state.
-        with st.chat_message("assistant"):
-            response = st.write_stream(stream)
-        st.session_state.messages.append({"role": "assistant", "content": response})
+
+def chat(llm, message: str, history: list) -> str:
+    """Generate a response from the model."""
+    prompt = format_prompt(message, history)
+
+    output = llm(
+        prompt,
+        max_tokens=512,
+        temperature=1.5,
+        min_p=0.1,
+        stop=["<|eot_id|>", "<|end_of_text|>"],
+        echo=False,
+    )
+
+    response = output["choices"][0]["text"].strip()
+    return response
+
+
+# Load the model
+llm = load_model()
+
+# Create a session state variable to store the chat messages. This ensures that the
+# messages persist across reruns.
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# Display the existing chat messages via `st.chat_message`.
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+# Create a chat input field to allow the user to enter a message. This will display
+# automatically at the bottom of the page.
+if prompt := st.chat_input("What is up?"):
+
+    # Store and display the current prompt.
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    # Generate a response using the local Llama model.
+    # Convert message history to format expected by chat function
+    history = []
+    for i in range(0, len(st.session_state.messages) - 1, 2):
+        if i + 1 < len(st.session_state.messages):
+            history.append((
+                st.session_state.messages[i]["content"],
+                st.session_state.messages[i + 1]["content"]
+            ))
+
+    with st.chat_message("assistant"):
+        # Get the current user message
+        current_message = st.session_state.messages[-1]["content"]
+        response = chat(llm, current_message, history)
+        st.markdown(response)
+
+    st.session_state.messages.append({"role": "assistant", "content": response})
